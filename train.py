@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from model import ContrastiveLearning
+from model import ContrastiveLearning, PretrainModel, FinetuneModel
 from dataset import get_dataloaders
 from config import config
 import os
@@ -17,7 +17,7 @@ def train_contrastive(model, train_loader, optimizer, epoch):
         x1, x2 = x1.to(config['device']), x2.to(config['device'])
         
         optimizer.zero_grad()
-        z1, z2 = model(x1, x2)
+        z1, z2 = model(x1, x2)  # 预训练模型接收两个输入
         loss = model.contrastive_loss(z1, z2)
         
         loss.backward()
@@ -39,7 +39,7 @@ def train_classifier(model, train_loader, optimizer, criterion, epoch):
         x1, labels = x1.to(config['device']), labels.to(config['device'])
         
         optimizer.zero_grad()
-        outputs = model(x1)
+        outputs = model(x1)  # 微调模型只接收一个输入
         loss = criterion(outputs, labels)
         
         loss.backward()
@@ -68,7 +68,7 @@ def test(model, test_loader):
     with torch.no_grad():
         for x1, _, labels in pbar:
             x1, labels = x1.to(config['device']), labels.to(config['device'])
-            outputs = model(x1)
+            outputs = model(x1)  # 微调模型只接收一个输入
             test_loss += criterion(outputs, labels).item()
             pred = outputs.argmax(dim=1)
             correct += pred.eq(labels).sum().item()
@@ -87,6 +87,8 @@ def test(model, test_loader):
     
     return test_loss, accuracy
 
+# 在train_model函数中修改模型创建和训练部分
+
 def train_model(args):
     # 创建保存目录
     if not os.path.exists(config['checkpoint_dir']):
@@ -100,18 +102,16 @@ def train_model(args):
     # 获取数据加载器
     train_loader, test_loader = get_dataloaders()
     
-    # 创建模型
-    model = ContrastiveLearning().to(config['device'])
-    
     if args.stage == 'pretrain':
-        # 预训练阶段
+        # 预训练阶段 - 使用PretrainModel
         print("Stage: Contrastive Learning Pre-training")
+        model = PretrainModel().to(config['device'])
         optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'],
                               weight_decay=config['weight_decay'])
         scheduler = CosineAnnealingLR(optimizer, T_max=config['num_epochs_pretrain'])
         
         best_loss = float('inf')
-        best_model_path = None  # 添加变量跟踪最佳模型路径
+        best_model_path = None
         
         for epoch in range(1, config['num_epochs_pretrain'] + 1):
             loss = train_contrastive(model, train_loader, optimizer, epoch)
@@ -135,27 +135,29 @@ def train_model(args):
                 print(f"Saved best model at epoch {epoch} with loss: {loss:.6f}")
 
     elif args.stage == 'finetune':
-        # 加载预训练模型
+        # 微调阶段 - 使用FinetuneModel
         if args.resume is None:
             raise ValueError("Must provide --resume checkpoint path for fine-tuning")
         
-        checkpoint = torch.load(args.resume)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        print(f"Loaded pre-trained model from {args.resume}")
+        # 加载预训练的编码器
+        pretrain_checkpoint = torch.load(args.resume)
+        pretrain_model = PretrainModel()
+        pretrain_model.load_state_dict(pretrain_checkpoint['model_state_dict'])
+        pretrained_encoder = pretrain_model.encoder
+        
+        # 创建微调模型，使用预训练的编码器
+        model = FinetuneModel(pretrained_encoder=pretrained_encoder).to(config['device'])
+        print(f"Loaded pre-trained encoder from {args.resume}")
         
         # 微调阶段
         print("Stage: Classifier Fine-tuning")
-        # 冻结编码器参数
-        for param in model.encoder.parameters():
-            param.requires_grad = False
-        
         optimizer = optim.Adam(model.decoder.parameters(), lr=config['learning_rate'],
                               weight_decay=config['weight_decay'])
         scheduler = CosineAnnealingLR(optimizer, T_max=config['num_epochs_finetune'])
         criterion = nn.CrossEntropyLoss()
         
         best_acc = 0
-        best_model_path = None  # 添加变量跟踪最佳模型路径
+        best_model_path = None
         
         for epoch in range(1, config['num_epochs_finetune'] + 1):
             train_loss, train_acc = train_classifier(model, train_loader, optimizer,

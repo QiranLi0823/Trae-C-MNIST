@@ -14,7 +14,7 @@ config = {
     'device': 'cuda' if torch.cuda.is_available() else 'cpu',
     'learning_rate': 0.001,
     'weight_decay': 1e-4,
-    'num_epochs_pretrain': 50,  # 对比学习预训练轮数
+    'num_epochs_pretrain': 100,  # 对比学习预训练轮数
     'num_epochs_finetune': 30,   # 分类器微调轮数
     
     # 数据增强配置
